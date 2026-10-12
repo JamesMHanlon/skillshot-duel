@@ -242,9 +242,33 @@
 
   function showWait(code) {
     hideAll(); $('wait').classList.remove('hidden');
+    $('invite').classList.toggle('hidden', !code);
     if (!code) { $('waitTitle').textContent = 'Finding opponent…'; $('waitCode').textContent = ''; $('waitSub').textContent = 'You will be matched with the next player who presses Quick Match.'; }
-    else { $('waitTitle').textContent = 'Private room'; $('waitCode').textContent = code; $('waitSub').textContent = 'Send this code to your friend so they can join.'; }
+    else {
+      $('waitTitle').textContent = 'Private room'; $('waitCode').textContent = code;
+      $('waitSub').textContent = 'Send your friend the code or the invite link. The link joins them straight in.';
+      $('inviteLink').value = inviteUrl(code);
+    }
   }
+
+  function inviteUrl(code) { return location.origin + location.pathname + '?join=' + code; }
+
+  async function copyText(text, btn) {
+    const label = btn.textContent;
+    try { await navigator.clipboard.writeText(text); }
+    catch {
+      // clipboard API can be blocked inside iframes: fall back to selecting + execCommand
+      const i = $('inviteLink'), old = i.value;
+      i.value = text; i.select();
+      try { document.execCommand('copy'); } catch {}
+      i.value = old;
+    }
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = label; }, 1400);
+  }
+  $('copyCode').onclick = e => copyText($('waitCode').textContent, e.currentTarget);
+  $('copyLink').onclick = e => copyText($('inviteLink').value, e.currentTarget);
+  $('inviteLink').onfocus = e => e.target.select();
 
   setInterval(() => { if (!host && conn && conn.open) conn.send({ t: 'ping', n: performance.now() }); }, 1000);
 
@@ -390,7 +414,9 @@
     run(() => hostGame(code, false));
   };
   $('join').onclick = () => {
-    const code = $('code').value.trim();
+    // accept a bare code or a pasted invite link
+    const raw = $('code').value, m = raw.match(/join=([a-z]{4})/i);
+    const code = (m ? m[1] : raw).replace(/[^a-z]/gi, '');
     if (code.length !== 4) { $('menuMsg').textContent = 'Enter a 4-letter room code.'; return; }
     run(() => joinGame(code.toUpperCase(), false));
   };
@@ -401,6 +427,15 @@
     if (mode === 'solo') startSolo(solo.level);
     else if (mode === 'online' && netOpen()) { sendNet({ t: 'rematch' }); $('endMsg').textContent = 'Waiting for opponent…'; }
   };
+
+  // Invite links: ?join=CODE joins that room straight away
+  const joinParam = new URLSearchParams(location.search).get('join');
+  if (joinParam) {
+    const code = joinParam.replace(/[^a-z]/gi, '').toUpperCase().slice(0, 4);
+    history.replaceState(null, '', location.pathname);
+    $('code').value = code;
+    if (code.length === 4) run(() => joinGame(code, false));
+  }
 
   // ---------------------------------------------------------------- rendering
   function drawArena() {
