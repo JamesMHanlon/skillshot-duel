@@ -1,15 +1,12 @@
 {
   "name": "skillshot-duel",
   "version": "1.0.0",
-  "description": "1v1 Ezreal-style skillshot dodgeball, online multiplayer + bot mode",
+  "description": "1v1 Ezreal-style skillshot dodgeball, peer-to-peer online + bot mode",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "engines": {
     "node": ">=18"
-  },
-  "dependencies": {
-    "ws": "^8.18.0"
   }
 }

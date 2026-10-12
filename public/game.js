@@ -9,7 +9,7 @@
   let mode = null;              // 'solo' | 'online' | null
   let me = 0;
   let solo = null;              // { s, bot, queue, acc, level }
-  let ws = null, net = null;
+  let net = null;
   let view = { scale: 1, ox: 0, oy: 0 };
   const mouse = { x: C.W / 2, y: C.H / 2, sx: 0, sy: 0 };
   let rmb = false, lastMoveSend = 0;
@@ -68,9 +68,9 @@
 
   function cmd(c) {
     if (mode === 'solo') { solo.queue.push(c); return; }
-    if (mode === 'online' && net && ws && ws.readyState === 1) {
+    if (mode === 'online' && net && netOpen()) {
       c.seq = ++net.seq;
-      ws.send(JSON.stringify({ t: 'c', c }));
+      sendNet({ t: 'c', c });
       // apply locally for instant feedback
       Sim.applyCmd(net.pred, me, c);
       handleEvents(net.pred.events.splice(0), true);
@@ -140,22 +140,113 @@
   }
 
   // ---------------------------------------------------------------- online
-  function connect(onOpen) {
-    if (ws && ws.readyState === 1) return onOpen();
-    if (location.protocol === 'file:' && !window.GAME_SERVER) { $('menuMsg').textContent = 'Online play needs the server running (npm start).'; return; }
-    const url = window.GAME_SERVER || (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host;
-    $('menuMsg').textContent = 'Connecting…';
-    ws = new WebSocket(url);
-    ws.onopen = () => { $('menuMsg').textContent = ''; onOpen(); };
-    ws.onerror = () => { $('menuMsg').textContent = 'Could not reach the game server.'; };
-    ws.onclose = () => {
-      ws = null;
-      if (mode === 'online') { toMenu(); $('menuMsg').textContent = 'Disconnected from server.'; }
-      $('wait').classList.add('hidden');
-    };
-    ws.onmessage = ev => onMsg(JSON.parse(ev.data));
+  // Peer-to-peer: whoever creates the room hosts the authoritative match in their browser.
+  // PeerJS's free cloud broker is only used to introduce the two browsers.
+  const PREFIX = 'skillshot-duel-jmh-';
+  let peer = null, conn = null, host = null;
+
+  function sendNet(m) {
+    if (host) host.handle(0, m);
+    else if (conn && conn.open) conn.send(m);
   }
-  setInterval(() => { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t: 'ping', n: performance.now() })); }, 1000);
+  function netOpen() { return !!(host || (conn && conn.open)); }
+
+  function closeNet() {
+    if (host) host.stop();
+    host = null;
+    if (conn) { conn.removeAllListeners && conn.removeAllListeners(); try { conn.close(); } catch {} }
+    conn = null;
+    if (peer) { try { peer.destroy(); } catch {} }
+    peer = null;
+  }
+
+  function makePeer(id) {
+    return new Promise((res, rej) => {
+      if (typeof Peer === 'undefined') return rej({ type: 'nolib' });
+      const p = id ? new Peer(id, { debug: 0 }) : new Peer({ debug: 0 });
+      p.once('open', () => res(p));
+      p.once('error', rej);
+    });
+  }
+
+  function errText(e) {
+    if (e && e.type === 'nolib') return 'Could not load the networking library. Check your connection.';
+    if (e && e.type === 'unavailable-id') return 'That room code is in use, try again.';
+    if (e && e.type === 'peer-unavailable') return 'Room not found. Check the code.';
+    return 'Connection failed' + (e && e.type ? ' (' + e.type + ')' : '') + '.';
+  }
+
+  function opponentLeft() {
+    const wasPlaying = mode === 'online' || !$('wait').classList.contains('hidden');
+    closeNet();
+    if (wasPlaying) { toMenu(true); $('menuMsg').textContent = 'Your opponent left the match.'; }
+  }
+
+  async function hostGame(code, quick) {
+    closeNet();
+    $('menuMsg').textContent = 'Connecting…';
+    peer = await makePeer(PREFIX + code);
+    $('menuMsg').textContent = '';
+    showWait(quick ? null : code);
+    peer.on('error', e => { if (!mode) $('menuMsg').textContent = errText(e); });
+    peer.on('connection', c => {
+      if (conn) { c.on('open', () => c.close()); return; }
+      conn = c;
+      c.on('open', () => {
+        host = new HostRoom((side, m) => {
+          if (side === 0) onMsg(m);
+          else if (c.open) c.send(m);
+        });
+        c.on('data', m => host && host.handle(1, m));
+        host.start();
+        if (quick) peer.disconnect(); // free the lobby id for the next pair; our link stays up
+      });
+      c.on('close', opponentLeft);
+      c.on('error', opponentLeft);
+    });
+  }
+
+  async function joinGame(code, quick) {
+    closeNet();
+    $('menuMsg').textContent = 'Connecting…';
+    peer = await makePeer();
+    return new Promise((res, rej) => {
+      const c = peer.connect(PREFIX + code, { reliable: true });
+      const to = setTimeout(() => rej({ type: 'peer-unavailable' }), 8000);
+      peer.on('error', e => { clearTimeout(to); rej(e); });
+      c.on('open', () => {
+        clearTimeout(to);
+        conn = c;
+        $('menuMsg').textContent = '';
+        c.on('data', onMsg);
+        c.on('close', opponentLeft);
+        res();
+      });
+    });
+  }
+
+  async function quickMatch() {
+    // Try to join whoever is waiting in the lobby; if nobody is, become the lobby.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try { await joinGame('quick-lobby', true); return; }
+      catch (e) { if (e.type !== 'peer-unavailable') throw e; }
+      try { await hostGame('quick-lobby', true); return; }
+      catch (e) { if (e.type !== 'unavailable-id') throw e; }
+    }
+    throw { type: 'busy' };
+  }
+
+  function run(fn) {
+    fn().catch(e => { closeNet(); toMenu(true); $('menuMsg').textContent = errText(e); });
+  }
+
+  function showWait(code) {
+    hideAll(); $('wait').classList.remove('hidden');
+    if (!code) { $('waitTitle').textContent = 'Finding opponent…'; $('waitCode').textContent = ''; $('waitSub').textContent = 'You will be matched with the next player who presses Quick Match.'; }
+    else { $('waitTitle').textContent = 'Private room'; $('waitCode').textContent = code; $('waitSub').textContent = 'Send this code to your friend so they can join.'; }
+  }
+
+  setInterval(() => { if (!host && conn && conn.open) conn.send({ t: 'ping', n: performance.now() }); }, 1000);
 
   function onMsg(m) {
     switch (m.t) {
@@ -273,7 +364,7 @@
   function hideAll() { ['menu', 'wait', 'end'].forEach(id => $(id).classList.add('hidden')); }
   function resetFx() { fx.parts = []; fx.banner = null; fx.marker = null; fx.shake = 0; }
   function toMenu(keepSocket) {
-    if (mode === 'online' && ws && ws.readyState === 1 && !keepSocket) ws.send(JSON.stringify({ t: 'leave' }));
+    if (!keepSocket) closeNet();
     mode = null; solo = null; net = null; rmb = false;
     hideAll(); $('menu').classList.remove('hidden'); $('menuMsg').textContent = '';
   }
@@ -292,19 +383,23 @@
   }
 
   document.querySelectorAll('[data-bot]').forEach(b => b.onclick = () => startSolo(b.dataset.bot));
-  $('quick').onclick = () => connect(() => ws.send(JSON.stringify({ t: 'quick' })));
-  $('create').onclick = () => connect(() => ws.send(JSON.stringify({ t: 'create' })));
+  $('quick').onclick = () => run(quickMatch);
+  $('create').onclick = () => {
+    const A = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+    const code = Array.from({ length: 4 }, () => A[Math.floor(Math.random() * A.length)]).join('');
+    run(() => hostGame(code, false));
+  };
   $('join').onclick = () => {
     const code = $('code').value.trim();
     if (code.length !== 4) { $('menuMsg').textContent = 'Enter a 4-letter room code.'; return; }
-    connect(() => ws.send(JSON.stringify({ t: 'join', code })));
+    run(() => joinGame(code.toUpperCase(), false));
   };
   $('code').addEventListener('keydown', e => { if (e.key === 'Enter') $('join').click(); });
-  $('cancel').onclick = () => { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t: 'leave' })); toMenu(true); };
+  $('cancel').onclick = () => toMenu();
   $('toMenu').onclick = () => toMenu();
   $('rematch').onclick = () => {
     if (mode === 'solo') startSolo(solo.level);
-    else if (mode === 'online' && ws) { ws.send(JSON.stringify({ t: 'rematch' })); $('endMsg').textContent = 'Waiting for opponent…'; }
+    else if (mode === 'online' && netOpen()) { sendNet({ t: 'rematch' }); $('endMsg').textContent = 'Waiting for opponent…'; }
   };
 
   // ---------------------------------------------------------------- rendering

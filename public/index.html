@@ -82,12 +82,10 @@
   </div>
 </div>
 
-<script>
-  // Point this at your game server if the page is hosted somewhere else (e.g. "wss://duel.example.com").
-  window.GAME_SERVER = new URLSearchParams(location.search).get('server') || null;
-</script>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script src="sim.js"></script>
 <script src="bot.js"></script>
+<script src="host.js"></script>
 <script src="game.js"></script>
 </body>
 </html>
